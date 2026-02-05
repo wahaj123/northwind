@@ -1,0 +1,147 @@
+name: Smart Terraform Pipeline
+
+on:
+  pull_request:
+  push:
+    branches: [ main ]
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      run_tf: ${{ steps.filter.outputs.run_tf }}
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed paths
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            changelog:
+              - 'CHANGELOG.md'
+            global_iam:
+              - 'global/iam/**'
+            payment_api:
+              - 'apps/payment-api/**'
+            user_api:
+              - 'apps/user-api/**'
+
+      - name: Build matrix
+        id: set-matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          CHANGELOG='${{ steps.filter.outputs.changelog }}'
+          GLOBAL_IAM='${{ steps.filter.outputs.global_iam }}'
+          PAYMENT='${{ steps.filter.outputs.payment_api }}'
+          USER='${{ steps.filter.outputs.user_api }}'
+
+          # Case 1: only CHANGELOG changed => no terraform
+          if [[ "$CHANGELOG" == "true" && "$GLOBAL_IAM" == "false" && "$PAYMENT" == "false" && "$USER" == "false" ]]; then
+            echo "run_tf=false" >> "$GITHUB_OUTPUT"
+            echo 'matrix={"include":[]}' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          declare -a targets=()
+
+          # Case 2: shared IAM changed => run ALL apps
+          if [[ "$GLOBAL_IAM" == "true" ]]; then
+            targets+=("apps/payment-api" "apps/user-api")
+          else
+            # Case 3: app-specific changes => run only changed app(s)
+            [[ "$PAYMENT" == "true" ]] && targets+=("apps/payment-api")
+            [[ "$USER" == "true" ]] && targets+=("apps/user-api")
+          fi
+
+          # Deduplicate targets
+          mapfile -t uniq_targets < <(printf "%s\n" "${targets[@]}" | awk '!seen[$0]++')
+
+          if [[ ${#uniq_targets[@]} -eq 0 ]]; then
+            echo "run_tf=false" >> "$GITHUB_OUTPUT"
+            echo 'matrix={"include":[]}' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Build JSON matrix
+          json='{"include":['
+          for t in "${uniq_targets[@]}"; do
+            json+="{\"path\":\"$t\"},"
+          done
+          json="${json%,}]}"
+          echo "run_tf=true" >> "$GITHUB_OUTPUT"
+          echo "matrix=$json" >> "$GITHUB_OUTPUT"
+
+      - name: Summary (no terraform needed)
+        if: steps.filter.outputs.changelog == 'true' && steps.filter.outputs.global_iam == 'false' && steps.filter.outputs.payment_api == 'false' && steps.filter.outputs.user_api == 'false'
+        run: |
+          {
+            echo "## Terraform Plan Summary"
+            echo ""
+            echo "Only \`CHANGELOG.md\` changed. No Terraform plan required ✅"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  terraform-plan:
+    name: Terraform Plan (${{ matrix.path }})
+    needs: detect-changes
+    if: needs.detect-changes.outputs.run_tf == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
+
+    defaults:
+      run:
+        working-directory: ${{ matrix.path }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        run: terraform init -input=false -no-color
+
+      - name: Terraform Validate
+        run: terraform validate -no-color
+
+      - name: Terraform Plan
+        id: plan
+        shell: bash
+        run: |
+          set +e
+          terraform plan -input=false -no-color -out=tfplan > plan.txt 2>&1
+          exit_code=$?
+          echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
+          # Allow summary + upload even if diff/error, fail later explicitly
+          exit 0
+
+      - name: Publish plan to Job Summary
+        shell: bash
+        run: |
+          {
+            echo "## Plan result: \`${{ matrix.path }}\`"
+            echo ""
+            echo "**Exit code:** \`${{ steps.plan.outputs.exit_code }}\`"
+            echo ""
+            echo "<details><summary>Show terraform plan output</summary>"
+            echo ""
+            echo '```txt'
+            cat plan.txt
+            echo '```'
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail if plan errored
+        if: steps.plan.outputs.exit_code == '1'
+        run: exit 1

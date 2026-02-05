@@ -1,0 +1,43 @@
+# Local .terraform directories
+**/.terraform/*
+.terraform/*
+
+# Terraform state files
+*.tfstate
+*.tfstate.*
+
+# Crash logs
+crash.log
+crash.*.log
+
+# Ignore tfvars containing secrets (keep example tfvars tracked if needed)
+*.auto.tfvars
+*.auto.tfvars.json
+*.tfvars
+*.tfvars.json
+
+# Exception: keep your shared config tfvars tracked (remove these lines if you want all tfvars ignored)
+!config/stage.tfvars
+!config/prod.tfvars
+
+# Terraform plan output files
+*.tfplan
+plan.out
+plan.txt
+
+# Terraform lock file (recommended to KEEP tracked for reproducibility)
+# Uncomment next line only if you explicitly do NOT want to track it
+# .terraform.lock.hcl
+
+# CLI config / credentials
+.terraformrc
+.terraform.lock.hcl
+terraform.rc
+
+# OS/editor junk
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.vscode/
+.idea/
